@@ -1,36 +1,101 @@
 import os
+import re
 from pypdf import PdfReader
-from datasketch import MinHashLSH, MinHash
+from datasketch import MinHash, MinHashLSH
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+import nltk
 
-path = "/home/abhi/Documents" # path to the folder which contains pdf files
-dir_list = os.listdir(path)
-res = set()
-lsh = MinHashLSH(threshold=0.5, num_perm=128)
+# Download stopwords if not already
+nltk.download('stopwords')
 
-#iterating over the files
-for file in dir_list:
+# Config
+path = "/home/abhi/Documents"
+threshold = 0.85
+num_perm = 256
+ngram_size = 3
+
+stop_words = set(stopwords.words('english'))
+stemmer = PorterStemmer()
+
+def is_pdf_by_extension(file_path):
+    return file_path.lower().endswith('.pdf')
+
+def preprocess_text(text):
+    """Return a list of cleaned, stemmed, lowercase words without stopwords."""
+    words = text.lower().split()
+    cleaned = []
+
+    for w in words:
+        w = re.sub(r'\W+', '', w)
+        if w and w not in stop_words:
+            cleaned_word = stemmer.stem(w)
+            cleaned.append(cleaned_word)
+
+    return cleaned
+
+def get_ngrams(words, n=3):
+    ngrams = []
+    for i in range(len(words) - n + 1):
+        ngram = ' '.join(words[i:i+n])
+        ngrams.append(ngram)
+    return ngrams
+
+# Step 1: Extract and clean words from PDFs
+files = {}
+
+for file in os.listdir(path):
+    if not is_pdf_by_extension(file):
+        continue
+
     file_path = os.path.join(path, file)
     reader = PdfReader(file_path)
-    file_set = set() # stores all the unique words of a word
-    for page in reader.pages: # iterating all the pages in documents
-        text = page.extract_text() 
-        for word in text.split():
-            file_set.add(word.encode('utf-8')) # add encoded data into the set
+    full_word_list = []
 
-    # iterating over the text to generate the minhashes
-    hash = MinHash(num_perm = 128)
-    for text in file_set:
-        hash.update(text) 
+    for page in reader.pages:
+        text = page.extract_text()
+        if text:
+            cleaned_words = preprocess_text(text)
+            for word in cleaned_words:
+                full_word_list.append(word)
 
-    # matches the minhash values
-    matches = lsh.query(hash)
-    if len(matches) != 0:
-        for file_names in matches:
-            res.add(file_names)
-        res.add(file)
-    lsh.insert(file, hash)
-print(res)
-    
-    
+    ngrams = get_ngrams(full_word_list, ngram_size)
+    encoded_shingles = set()
 
+    for ng in ngrams:
+        encoded_shingles.add(ng.encode('utf-8'))
 
+    files[file] = encoded_shingles
+
+# Step 2: Create MinHash objects
+file_hashes = {}
+
+for file, shingles in files.items():
+    m = MinHash(num_perm=num_perm)
+    for sh in shingles:
+        m.update(sh)
+    file_hashes[file] = m
+
+# Step 3: Build LSH index
+lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
+
+for file, mh in file_hashes.items():
+    lsh.insert(file, mh)
+
+# Step 4: Query for similar documents
+res = set()
+
+for file, mh in file_hashes.items():
+    matches = lsh.query(mh)
+    for match in matches:
+        if match != file:
+            sim = mh.jaccard(file_hashes[match])
+            if sim >= threshold:
+                res.add(file)
+                res.add(match)
+
+# Step 5: Print result
+print(f"\nFound {len(res)} similar or near-duplicate files:\n")
+for name in res:
+    print(name)
+ 
